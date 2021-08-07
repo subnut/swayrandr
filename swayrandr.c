@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <json-c/json.h>
 
 /*
  * stdint.h     -   uint32_t
@@ -61,6 +62,10 @@ create_message(struct message *message, uint32_t type, void *payload, size_t siz
 static void
 get_reply(struct reply *reply, int sockfd)
 {
+        /* To avoid uninitialized variables */
+        reply->size = 0;
+        reply->payload = NULL;
+
         void *buf;
         void *ptr;
         uint32_t payload_len;
@@ -69,10 +74,16 @@ get_reply(struct reply *reply, int sockfd)
         bufsize = sizeof magic + sizeof (uint32_t) * 2;
         buf = malloc(bufsize);
         if (buf == NULL)
-                return perror("Failed to allocate memory for reply");
+        {
+                perror("Failed to allocate memory for reply");
+                return;
+        }
 
         if (recv(sockfd, buf, bufsize, MSG_PEEK) == -1)
-                return perror("Failed to read from socket");
+        {
+                perror("Failed to read from socket");
+                return;
+        }
 
         ptr = buf + sizeof magic;
         memmove(&payload_len, ptr, sizeof (uint32_t));
@@ -83,69 +94,113 @@ get_reply(struct reply *reply, int sockfd)
 
         buf = malloc(bufsize);
         if (buf == NULL)
-                return perror("Failed to allocate memory for reply");
+        {
+                perror("Failed to allocate memory for reply");
+                return;
+        }
 
         if (recv(sockfd, buf, bufsize, 0) == -1)    // 0 means no flags
-                return perror("Failed to read from socket");
+        {
+                perror("Failed to read from socket");
+                return;
+        }
 
         reply->payload = malloc(reply->size);
         if (reply->payload == NULL)
-                return perror("Failed to allocate memory for reply");
+        {
+                perror("Failed to allocate memory for reply");
+                return;
+        }
 
         ptr = buf + sizeof magic + sizeof (uint32_t) * 2;
         memmove(reply->payload, ptr, (size_t)reply->size);
         free(buf);
 }
 
-/* TODO: Don't just return immediately. close(), free(), etc and _then_ return */
-int main(void)
+struct json_object *
+get_outputs(void)
 {
         char *envvar;
         int sockfd;
         struct sockaddr_un sockaddr;
         sockaddr.sun_family = AF_UNIX;
         size_t sizeof_sun_path = sizeof sockaddr.sun_path/sizeof sockaddr.sun_path[0];
+        struct json_object *outputs;
+        outputs = NULL;
 
         envvar = getenv("SWAYSOCK");
         if (envvar == NULL)
-                return fputs("SWAYSOCK not set. Is sway running?\n", stderr),
-                       EXIT_FAILURE;
+        {
+                fputs("SWAYSOCK not set\nIs sway running?\n", stderr);
+                goto exit1;
+        }
         if (memcmp(envvar, "", 1) == 0)
-                return fputs("SWAYSOCK is empty\n", stderr),
-                       EXIT_FAILURE;
+        {
+                fputs("SWAYSOCK is empty\n", stderr);
+                goto exit1;
+        }
         if (strlen(envvar) > sizeof_sun_path - 1)       // -1 for '\0'
-                return fprintf(stderr, "Length of SWAYSOCK exceeds %zu\n", sizeof_sun_path - 1),
-                       EXIT_FAILURE;
+        {
+                fprintf(stderr, "Length of SWAYSOCK exceeds %zu\n", sizeof_sun_path - 1);
+                goto exit1;
+        }
         memmove(sockaddr.sun_path, envvar, sizeof_sun_path);
 
         if ((sockfd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1)
-                return perror("Could not create socket"),
-                       EXIT_FAILURE;
+        {
+                perror("Could not get file descriptor for socket");
+                goto exit1;
+        }
 
         if (connect(sockfd, (struct sockaddr *)&sockaddr, sizeof sockaddr) == -1)
-                return perror("Could not connect to socket"),
-                       EXIT_FAILURE;
+        {
+                perror("Could not connect to socket");
+                goto exit2;
+        }
 
         struct message message;
         create_message(&message, 3, NULL, 0);
         if (message.payload == NULL)
-                return perror("Failed to allocate memory for payload"),
-                       EXIT_FAILURE;
+        {
+                perror("Failed to allocate memory for payload");
+                goto exit3;
+        }
 
         int retcode;
         retcode = send(sockfd, message.payload, message.size, MSG_NOSIGNAL);
         free(message.payload);
         if (retcode == -1)
-                return perror("Failed to write to socket"),
-                       EXIT_FAILURE;
+        {
+                perror("Failed to write to socket");
+                goto exit3; /* Since message.payload has already been freed */
+        }
 
         struct reply reply;
         get_reply(&reply, sockfd);
         if (reply.payload == NULL)
+                goto exit3;
+
+        outputs = json_tokener_parse(reply.payload);
+        free(reply.payload);
+        if (outputs == NULL)
+                fputs("Failed to parse JSON\n", stderr);
+
+exit3:  shutdown(sockfd, SHUT_RDWR);
+exit2:  close(sockfd);
+exit1:  return outputs;
+}
+
+int
+main(void)
+{
+        struct json_object *outputs;
+        outputs = get_outputs();
+        if (outputs == NULL)
                 return EXIT_FAILURE;
 
-        for (uint32_t size = 0; size <= reply.size; size++)
-                putchar(reply.payload[size]);
+        puts(json_object_to_json_string_ext(outputs, JSON_C_TO_STRING_PRETTY));
+        if (json_object_put(outputs) == 1)
+                outputs = NULL;
 
         return EXIT_SUCCESS;
 }
