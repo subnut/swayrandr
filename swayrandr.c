@@ -29,6 +29,13 @@ struct reply {
         char *payload;
 };
 
+static inline void
+json_object_free(struct json_object *object)
+{
+        while (json_object_put(object) != 1);
+        object = NULL;
+}
+
 static void
 create_message(struct message *message, uint32_t type, void *payload, size_t size)
 {
@@ -199,8 +206,7 @@ main(void)
                 return EXIT_FAILURE;
 
         puts(json_object_to_json_string_ext(outputs, JSON_C_TO_STRING_PRETTY));
-        if (json_object_put(outputs) == 1)
-                outputs = NULL;
+        json_object_free(outputs);
 
         return EXIT_SUCCESS;
 }
